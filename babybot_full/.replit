@@ -1,0 +1,5 @@
+[interpreter]
+command = ["python", "main.py"]
+
+[deployment]
+runCommand = "python main.py"
