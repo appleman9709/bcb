@@ -50,9 +50,10 @@ test_*.py
 *_test.py
 debug_*.py
 
-# Documentation
+# Documentation (except README files)
 *.md
-README*
+!README.md
+!*README.md
 
 # Temporary files
 temp/
