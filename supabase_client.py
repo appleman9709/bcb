@@ -961,6 +961,283 @@ def get_all_families() -> List[int]:
         print(f"❌ Ошибка получения списка семей: {e}")
         return []
 
+def get_time_until_next_feeding(family_id: int) -> Optional[float]:
+    """Получить время в часах до следующего кормления"""
+    try:
+        settings = get_notification_settings(family_id)
+        if not settings:
+            return None
+        
+        feed_interval = settings.get('feed_interval', 3)
+        last_feeding = get_last_feeding_time_for_family(family_id)
+        
+        if not last_feeding:
+            return None
+        
+        now = get_thai_time()
+        time_diff = now - last_feeding
+        hours_since_feeding = time_diff.total_seconds() / 3600
+        
+        # Время до следующего кормления
+        time_until_next = feed_interval - hours_since_feeding
+        return max(0, time_until_next)
+    except Exception as e:
+        print(f"❌ Ошибка расчета времени до кормления: {e}")
+        return None
+
+def get_time_until_next_diaper_change(family_id: int) -> Optional[float]:
+    """Получить время в часах до следующей смены подгузника"""
+    try:
+        settings = get_notification_settings(family_id)
+        if not settings:
+            return None
+        
+        diaper_interval = settings.get('diaper_interval', 2)
+        last_diaper = get_last_diaper_change_time_for_family(family_id)
+        
+        if not last_diaper:
+            return None
+        
+        now = get_thai_time()
+        time_diff = now - last_diaper
+        hours_since_diaper = time_diff.total_seconds() / 3600
+        
+        # Время до следующей смены подгузника
+        time_until_next = diaper_interval - hours_since_diaper
+        return max(0, time_until_next)
+    except Exception as e:
+        print(f"❌ Ошибка расчета времени до смены подгузника: {e}")
+        return None
+
+def check_pre_reminder_conditions(family_id: int) -> Dict[str, Any]:
+    """Проверить условия для предварительных напоминаний (за 5 минут)"""
+    try:
+        settings = get_notification_settings(family_id)
+        if not settings:
+            return {'needs_pre_feeding': False, 'needs_pre_diaper': False}
+        
+        feed_interval = settings.get('feed_interval', 3)
+        diaper_interval = settings.get('diaper_interval', 2)
+        
+        # Проверяем кормление
+        time_until_feeding = get_time_until_next_feeding(family_id)
+        needs_pre_feeding = False
+        
+        if time_until_feeding is not None:
+            # Если до кормления осталось 5 минут или меньше (0.083 часа)
+            needs_pre_feeding = 0 <= time_until_feeding <= 0.083
+        
+        # Проверяем смену подгузника
+        time_until_diaper = get_time_until_next_diaper_change(family_id)
+        needs_pre_diaper = False
+        
+        if time_until_diaper is not None:
+            # Если до смены подгузника осталось 5 минут или меньше (0.083 часа)
+            needs_pre_diaper = 0 <= time_until_diaper <= 0.083
+        
+        return {
+            'needs_pre_feeding': needs_pre_feeding,
+            'needs_pre_diaper': needs_pre_diaper,
+            'time_until_feeding': time_until_feeding,
+            'time_until_diaper': time_until_diaper
+        }
+    except Exception as e:
+        print(f"❌ Ошибка проверки предварительных условий: {e}")
+        return {'needs_pre_feeding': False, 'needs_pre_diaper': False}
+
+def check_overdue_reminder_conditions(family_id: int) -> Dict[str, Any]:
+    """Проверить условия для напоминаний о пропущенных событиях (через 15 минут после времени)"""
+    try:
+        settings = get_notification_settings(family_id)
+        if not settings:
+            return {'needs_overdue_feeding': False, 'needs_overdue_diaper': False}
+        
+        feed_interval = settings.get('feed_interval', 3)
+        diaper_interval = settings.get('diaper_interval', 2)
+        
+        # Проверяем кормление
+        last_feeding = get_last_feeding_time_for_family(family_id)
+        needs_overdue_feeding = False
+        
+        if last_feeding:
+            now = get_thai_time()
+            time_diff = now - last_feeding
+            hours_since_feeding = time_diff.total_seconds() / 3600
+            
+            # Если прошло больше интервала + 15 минут (0.25 часа)
+            needs_overdue_feeding = hours_since_feeding >= (feed_interval + 0.25)
+        
+        # Проверяем смену подгузника
+        last_diaper = get_last_diaper_change_time_for_family(family_id)
+        needs_overdue_diaper = False
+        
+        if last_diaper:
+            now = get_thai_time()
+            time_diff = now - last_diaper
+            hours_since_diaper = time_diff.total_seconds() / 3600
+            
+            # Если прошло больше интервала + 15 минут (0.25 часа)
+            needs_overdue_diaper = hours_since_diaper >= (diaper_interval + 0.25)
+        
+        return {
+            'needs_overdue_feeding': needs_overdue_feeding,
+            'needs_overdue_diaper': needs_overdue_diaper,
+            'hours_since_feeding': hours_since_feeding if last_feeding else 0,
+            'hours_since_diaper': hours_since_diaper if last_diaper else 0
+        }
+    except Exception as e:
+        print(f"❌ Ошибка проверки условий просроченных напоминаний: {e}")
+        return {'needs_overdue_feeding': False, 'needs_overdue_diaper': False}
+
+def get_pre_reminder_message(family_id: int) -> Optional[str]:
+    """Получить сообщение предварительного напоминания (за 5 минут)"""
+    try:
+        conditions = check_pre_reminder_conditions(family_id)
+        
+        if not conditions['needs_pre_feeding'] and not conditions['needs_pre_diaper']:
+            return None
+        
+        # Определяем основной заголовок
+        if conditions['needs_pre_feeding'] and conditions['needs_pre_diaper']:
+            message = "⏰ **Скоро время кормления и смены подгузника!**\n\n"
+        elif conditions['needs_pre_feeding']:
+            message = "⏰ **Скоро время кормления!**\n\n"
+        else:
+            message = "⏰ **Скоро время смены подгузника!**\n\n"
+        
+        if conditions['needs_pre_feeding']:
+            time_until = conditions['time_until_feeding']
+            if time_until is not None:
+                minutes_left = int(time_until * 60)
+                message += f"🍼 **Кормление через {minutes_left} минут**\n\n"
+        
+        if conditions['needs_pre_diaper']:
+            time_until = conditions['time_until_diaper']
+            if time_until is not None:
+                minutes_left = int(time_until * 60)
+                message += f"💩 **Смена подгузника через {minutes_left} минут**\n\n"
+        
+        message += "💡 **Подготовьтесь заранее!**"
+        
+        return message
+    except Exception as e:
+        print(f"❌ Ошибка создания предварительного сообщения: {e}")
+        return None
+
+def get_overdue_reminder_message(family_id: int) -> Optional[str]:
+    """Получить сообщение напоминания о просроченных событиях (через 15 минут)"""
+    try:
+        conditions = check_overdue_reminder_conditions(family_id)
+        
+        if not conditions['needs_overdue_feeding'] and not conditions['needs_overdue_diaper']:
+            return None
+        
+        # Определяем основной заголовок
+        if conditions['needs_overdue_feeding'] and conditions['needs_overdue_diaper']:
+            message = "🚨 **Пропущено время кормления и смены подгузника!**\n\n"
+        elif conditions['needs_overdue_feeding']:
+            message = "🚨 **Пропущено время кормления!**\n\n"
+        else:
+            message = "🚨 **Пропущено время смены подгузника!**\n\n"
+        
+        if conditions['needs_overdue_feeding']:
+            hours = int(conditions['hours_since_feeding'])
+            minutes = int((conditions['hours_since_feeding'] - hours) * 60)
+            
+            if hours > 0:
+                time_str = f"{hours}ч {minutes}м"
+            else:
+                time_str = f"{minutes}м"
+            
+            message += f"🍼 **Кормление:**\n"
+            message += f"• Прошло: {time_str}\n"
+            message += f"• Пропущено на 15+ минут\n\n"
+        
+        if conditions['needs_overdue_diaper']:
+            hours = int(conditions['hours_since_diaper'])
+            minutes = int((conditions['hours_since_diaper'] - hours) * 60)
+            
+            if hours > 0:
+                time_str = f"{hours}ч {minutes}м"
+            else:
+                time_str = f"{minutes}м"
+            
+            message += f"💩 **Смена подгузника:**\n"
+            message += f"• Прошло: {time_str}\n"
+            message += f"• Пропущено на 15+ минут\n\n"
+        
+        message += "💡 **Немедленные действия:**"
+        
+        return message
+    except Exception as e:
+        print(f"❌ Ошибка создания сообщения о просроченных событиях: {e}")
+        return None
+
+def create_notification_tracking_table():
+    """Создать таблицу для отслеживания уведомлений"""
+    try:
+        # Создаем таблицу для отслеживания уведомлений
+        supabase.table('notification_tracking').create({
+            'family_id': 'integer',
+            'notification_type': 'text',  # 'pre_feeding', 'pre_diaper', 'overdue_feeding', 'overdue_diaper', 'regular_feeding', 'regular_diaper'
+            'event_time': 'timestamp',
+            'sent_at': 'timestamp',
+            'status': 'text'  # 'sent', 'acknowledged'
+        }).execute()
+        print("✅ Таблица отслеживания уведомлений создана")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка создания таблицы отслеживания: {e}")
+        return False
+
+def log_notification_sent(family_id: int, notification_type: str, event_time: datetime) -> bool:
+    """Записать отправленное уведомление"""
+    try:
+        supabase.table('notification_tracking').insert({
+            'family_id': family_id,
+            'notification_type': notification_type,
+            'event_time': event_time.isoformat(),
+            'sent_at': get_thai_time().isoformat(),
+            'status': 'sent'
+        }).execute()
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка записи уведомления: {e}")
+        return False
+
+def check_recent_notification(family_id: int, notification_type: str, minutes_threshold: int = 5) -> bool:
+    """Проверить, было ли отправлено уведомление недавно"""
+    try:
+        threshold_time = get_thai_time() - timedelta(minutes=minutes_threshold)
+        
+        result = supabase.table('notification_tracking').select('sent_at').eq('family_id', family_id).eq('notification_type', notification_type).gte('sent_at', threshold_time.isoformat()).execute()
+        
+        return len(result.data) > 0
+    except Exception as e:
+        print(f"❌ Ошибка проверки недавних уведомлений: {e}")
+        return False
+
+def acknowledge_notification(family_id: int, notification_type: str) -> bool:
+    """Отметить уведомление как подтвержденное"""
+    try:
+        supabase.table('notification_tracking').update({
+            'status': 'acknowledged'
+        }).eq('family_id', family_id).eq('notification_type', notification_type).eq('status', 'sent').execute()
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка подтверждения уведомления: {e}")
+        return False
+
+def cleanup_old_notifications(days: int = 7) -> bool:
+    """Очистить старые записи уведомлений"""
+    try:
+        cutoff_time = get_thai_time() - timedelta(days=days)
+        supabase.table('notification_tracking').delete().lt('sent_at', cutoff_time.isoformat()).execute()
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка очистки старых уведомлений: {e}")
+        return False
+
 # ==================== ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ КЭШЕМ ====================
 
 def clear_family_cache(user_id: int = None):
