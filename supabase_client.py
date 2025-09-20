@@ -1038,16 +1038,16 @@ def check_pre_reminder_conditions(family_id: int) -> Dict[str, Any]:
         needs_pre_feeding = False
         
         if time_until_feeding is not None:
-            # Если до кормления осталось 5 минут или меньше (0.083 часа)
-            needs_pre_feeding = 0 <= time_until_feeding <= 0.083
+            # Если до кормления осталось от 1 до 5 минут (0.017-0.083 часа)
+            needs_pre_feeding = 0.017 <= time_until_feeding <= 0.083
         
         # Проверяем смену подгузника
         time_until_diaper = get_time_until_next_diaper_change(family_id)
         needs_pre_diaper = False
         
         if time_until_diaper is not None:
-            # Если до смены подгузника осталось 5 минут или меньше (0.083 часа)
-            needs_pre_diaper = 0 <= time_until_diaper <= 0.083
+            # Если до смены подгузника осталось от 1 до 5 минут (0.017-0.083 часа)
+            needs_pre_diaper = 0.017 <= time_until_diaper <= 0.083
         
         return {
             'needs_pre_feeding': needs_pre_feeding,
@@ -1123,13 +1123,19 @@ def get_pre_reminder_message(family_id: int) -> Optional[str]:
             time_until = conditions['time_until_feeding']
             if time_until is not None:
                 minutes_left = int(time_until * 60)
-                message += f"🍼 **Кормление через {minutes_left} минут**\n\n"
+                if minutes_left > 0:
+                    message += f"🍼 **Кормление через {minutes_left} минут**\n\n"
+                else:
+                    message += f"🍼 **Кормление через несколько секунд**\n\n"
         
         if conditions['needs_pre_diaper']:
             time_until = conditions['time_until_diaper']
             if time_until is not None:
                 minutes_left = int(time_until * 60)
-                message += f"💩 **Смена подгузника через {minutes_left} минут**\n\n"
+                if minutes_left > 0:
+                    message += f"💩 **Смена подгузника через {minutes_left} минут**\n\n"
+                else:
+                    message += f"💩 **Смена подгузника через несколько секунд**\n\n"
         
         message += "💡 **Подготовьтесь заранее!**"
         
