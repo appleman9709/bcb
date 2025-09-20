@@ -25,8 +25,22 @@ if not all([SUPABASE_URL, SUPABASE_KEY]):
     print("   • SUPABASE_KEY")
     exit(1)
 
-# Создаем клиент Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Создаем клиент Supabase с обработкой ошибок
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase клиент создан успешно")
+except Exception as e:
+    print(f"❌ Ошибка создания Supabase клиента: {e}")
+    print("🔄 Попытка создать клиент с альтернативными настройками...")
+    try:
+        # Альтернативный способ создания клиента
+        from supabase import create_client as create_supabase_client
+        supabase = create_supabase_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase клиент создан альтернативным способом")
+    except Exception as e2:
+        print(f"❌ Критическая ошибка Supabase: {e2}")
+        print("🛑 Бот не может работать без Supabase")
+        exit(1)
 
 # Кэш для family_id (время жизни 5 минут)
 family_id_cache = {}

@@ -15,32 +15,68 @@ from typing import Optional
 import os
 from dotenv import load_dotenv
 
-# Импортируем функции для работы с Supabase
-from supabase_client import (
-    init_supabase, get_family_id, create_family, join_family_by_code, get_family_name, 
-    get_member_info, set_member_role, get_family_members_with_roles,
-    add_feeding, get_last_feeding_time, get_last_feeding_time_for_family,
-    add_diaper_change, get_last_diaper_change_time_for_family, get_last_diaper_change_for_family,
-    check_recent_feeding, check_recent_diaper_change,
-    get_user_intervals, set_user_interval, get_birth_date, set_birth_date,
-    get_baby_age_months, set_baby_age_months,
-    add_bath, get_last_bath_time_for_family,
-    add_activity, get_last_activity_time_for_family,
-    get_feeding_stats, get_diaper_stats, get_bath_stats, get_activity_stats,
-    get_notification_settings, update_notification_settings,
-    get_random_tip, get_feeding_history, get_diaper_history, get_bath_history,
-    get_activity_history, test_connection,
-    # Функции для напоминаний
-    check_smart_reminder_conditions, get_smart_reminder_message, 
-    get_family_members_for_notification, get_all_families, get_thai_time,
-    # Новые функции для системы уведомлений
-    check_pre_reminder_conditions, check_overdue_reminder_conditions,
-    get_pre_reminder_message, get_overdue_reminder_message,
-    get_time_until_next_feeding, get_time_until_next_diaper_change,
-    # Функции для отслеживания уведомлений
-    log_notification_sent, check_recent_notification, acknowledge_notification,
-    cleanup_old_notifications
-)
+# Импортируем функции для работы с Supabase с обработкой ошибок
+try:
+    from supabase_client import (
+        init_supabase, get_family_id, create_family, join_family_by_code, get_family_name, 
+        get_member_info, set_member_role, get_family_members_with_roles,
+        add_feeding, get_last_feeding_time, get_last_feeding_time_for_family,
+        add_diaper_change, get_last_diaper_change_time_for_family, get_last_diaper_change_for_family,
+        check_recent_feeding, check_recent_diaper_change,
+        get_user_intervals, set_user_interval, get_birth_date, set_birth_date,
+        get_baby_age_months, set_baby_age_months,
+        add_bath, get_last_bath_time_for_family,
+        add_activity, get_last_activity_time_for_family,
+        get_feeding_stats, get_diaper_stats, get_bath_stats, get_activity_stats,
+        get_notification_settings, update_notification_settings,
+        get_random_tip, get_feeding_history, get_diaper_history, get_bath_history,
+        get_activity_history, test_connection,
+        # Функции для напоминаний
+        check_smart_reminder_conditions, get_smart_reminder_message, 
+        get_family_members_for_notification, get_all_families, get_thai_time,
+        # Новые функции для системы уведомлений
+        check_pre_reminder_conditions, check_overdue_reminder_conditions,
+        get_pre_reminder_message, get_overdue_reminder_message,
+        get_time_until_next_feeding, get_time_until_next_diaper_change,
+        # Функции для отслеживания уведомлений
+        log_notification_sent, check_recent_notification, acknowledge_notification,
+        cleanup_old_notifications
+    )
+    print("✅ Основной Supabase клиент загружен успешно")
+except Exception as e:
+    print(f"❌ Ошибка загрузки основного Supabase клиента: {e}")
+    print("🔄 Попытка загрузить альтернативную версию...")
+    try:
+        from supabase_client_fallback import (
+            init_supabase, get_family_id, create_family, join_family_by_code, get_family_name, 
+            get_member_info, set_member_role, get_family_members_with_roles,
+            add_feeding, get_last_feeding_time, get_last_feeding_time_for_family,
+            add_diaper_change, get_last_diaper_change_time_for_family, get_last_diaper_change_for_family,
+            check_recent_feeding, check_recent_diaper_change,
+            get_user_intervals, set_user_interval, get_birth_date, set_birth_date,
+            get_baby_age_months, set_baby_age_months,
+            add_bath, get_last_bath_time_for_family,
+            add_activity, get_last_activity_time_for_family,
+            get_feeding_stats, get_diaper_stats, get_bath_stats, get_activity_stats,
+            get_notification_settings, update_notification_settings,
+            get_random_tip, get_feeding_history, get_diaper_history, get_bath_history,
+            get_activity_history, test_connection,
+            # Функции для напоминаний
+            check_smart_reminder_conditions, get_smart_reminder_message, 
+            get_family_members_for_notification, get_all_families, get_thai_time,
+            # Новые функции для системы уведомлений
+            check_pre_reminder_conditions, check_overdue_reminder_conditions,
+            get_pre_reminder_message, get_overdue_reminder_message,
+            get_time_until_next_feeding, get_time_until_next_diaper_change,
+            # Функции для отслеживания уведомлений
+            log_notification_sent, check_recent_notification, acknowledge_notification,
+            cleanup_old_notifications
+        )
+        print("✅ Альтернативный Supabase клиент загружен успешно")
+    except Exception as e2:
+        print(f"❌ Критическая ошибка загрузки Supabase клиента: {e2}")
+        print("🛑 Бот не может работать без Supabase")
+        exit(1)
 
 # Загружаем переменные окружения
 load_dotenv()
