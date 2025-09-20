@@ -49,6 +49,7 @@ load_dotenv()
 API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+REPLIT_EXTERNAL_URL = os.getenv('REPLIT_EXTERNAL_URL')  # Для UptimeRobot
 
 # Проверяем наличие всех необходимых переменных
 if not all([API_ID, API_HASH, BOT_TOKEN]):
@@ -177,15 +178,15 @@ def sync_to_render():
     thread = threading.Thread(target=sync_worker, daemon=True)
     thread.start()
 
-# Функция для внешнего keep-alive (для Render)
+# Функция для внешнего keep-alive (для Render и Replit)
 def external_keep_alive():
-    """Функция для внешнего keep-alive через Render"""
+    """Функция для внешнего keep-alive через Render или Replit"""
     try:
         import urllib.request
         import urllib.error
         
-        # Получаем внешний URL из переменных окружения
-        external_url = os.getenv('RENDER_EXTERNAL_URL')
+        # Получаем внешний URL из переменных окружения (приоритет Replit)
+        external_url = REPLIT_EXTERNAL_URL or os.getenv('RENDER_EXTERNAL_URL')
         if external_url:
             # Убираем trailing slash если есть
             if external_url.endswith('/'):
@@ -203,7 +204,7 @@ def external_keep_alive():
             except Exception as e:
                 print(f"⚠️ External keep-alive error: {e}")
         else:
-            print("ℹ️ RENDER_EXTERNAL_URL not set, skipping external keep-alive")
+            print("ℹ️ External URL not set, skipping external keep-alive")
             
     except Exception as e:
         print(f"❌ External keep-alive critical error: {e}")
@@ -499,7 +500,7 @@ def debug_reminders():
 scheduler.add_job(debug_reminders, 'interval', minutes=5, id='debug_reminders')
 print("⏰ Debug reminders scheduled every 5 minutes")
 
-# Добавляем внешний keep-alive для Render (каждые 3 минуты)
+# Добавляем внешний keep-alive для Render/Replit (каждые 3 минуты)
 scheduler.add_job(external_keep_alive, 'interval', minutes=3, id='external_keep_alive')
 print("⏰ External keep-alive scheduled every 3 minutes")
 
