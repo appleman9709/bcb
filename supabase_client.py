@@ -1060,7 +1060,7 @@ def check_pre_reminder_conditions(family_id: int) -> Dict[str, Any]:
         return {'needs_pre_feeding': False, 'needs_pre_diaper': False}
 
 def check_overdue_reminder_conditions(family_id: int) -> Dict[str, Any]:
-    """Проверить условия для напоминаний о пропущенных событиях (через 15 минут после времени)"""
+    """Проверить условия для напоминаний о пропущенных событиях (через 20 минут после времени)"""
     try:
         settings = get_notification_settings(family_id)
         if not settings:
@@ -1078,8 +1078,8 @@ def check_overdue_reminder_conditions(family_id: int) -> Dict[str, Any]:
             time_diff = now - last_feeding
             hours_since_feeding = time_diff.total_seconds() / 3600
             
-            # Если прошло больше интервала + 15 минут (0.25 часа)
-            needs_overdue_feeding = hours_since_feeding >= (feed_interval + 0.25)
+            # Если прошло больше интервала + 20 минут (~0.333 часа)
+            needs_overdue_feeding = hours_since_feeding >= (feed_interval + (20.0 / 60.0))
         
         # Проверяем смену подгузника
         last_diaper = get_last_diaper_change_time_for_family(family_id)
@@ -1090,8 +1090,8 @@ def check_overdue_reminder_conditions(family_id: int) -> Dict[str, Any]:
             time_diff = now - last_diaper
             hours_since_diaper = time_diff.total_seconds() / 3600
             
-            # Если прошло больше интервала + 15 минут (0.25 часа)
-            needs_overdue_diaper = hours_since_diaper >= (diaper_interval + 0.25)
+            # Если прошло больше интервала + 20 минут (~0.333 часа)
+            needs_overdue_diaper = hours_since_diaper >= (diaper_interval + (20.0 / 60.0))
         
         return {
             'needs_overdue_feeding': needs_overdue_feeding,
@@ -1145,7 +1145,7 @@ def get_pre_reminder_message(family_id: int) -> Optional[str]:
         return None
 
 def get_overdue_reminder_message(family_id: int) -> Optional[str]:
-    """Получить сообщение напоминания о просроченных событиях (через 15 минут)"""
+    """Получить сообщение напоминания о просроченных событиях (через 20 минут)"""
     try:
         conditions = check_overdue_reminder_conditions(family_id)
         
@@ -1171,7 +1171,7 @@ def get_overdue_reminder_message(family_id: int) -> Optional[str]:
             
             message += f"🍼 **Кормление:**\n"
             message += f"• Прошло: {time_str}\n"
-            message += f"• Пропущено на 15+ минут\n\n"
+            message += f"• Пропущено на 20+ минут\n\n"
         
         if conditions['needs_overdue_diaper']:
             hours = int(conditions['hours_since_diaper'])
@@ -1184,7 +1184,7 @@ def get_overdue_reminder_message(family_id: int) -> Optional[str]:
             
             message += f"💩 **Смена подгузника:**\n"
             message += f"• Прошло: {time_str}\n"
-            message += f"• Пропущено на 15+ минут\n\n"
+            message += f"• Пропущено на 20+ минут\n\n"
         
         message += "💡 **Немедленные действия:**"
         

@@ -1,14 +1,11 @@
-from telethon import TelegramClient, events, Button
+﻿from telethon import TelegramClient, events, Button
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
-import threading
 import time
-import http.server
-import socketserver
 import pytz
-import subprocess
-from typing import Optional
+from collections import deque
+from typing import Optional, Dict, List, Tuple, Deque
 
 import os
 from dotenv import load_dotenv
@@ -80,7 +77,6 @@ load_dotenv()
 API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-REPLIT_EXTERNAL_URL = os.getenv('REPLIT_EXTERNAL_URL')  # Для UptimeRobot
 
 if not all([API_ID, API_HASH, BOT_TOKEN]):
     print("❌ ОШИБКА: Не все необходимые переменные окружения установлены!")
@@ -188,13 +184,13 @@ def parse_birth_date(date_str: str) -> Optional[str]:
 def acknowledge_feeding_notifications(fid):
     """Подтверждает уведомления о кормлении"""
     acknowledge_notification(fid, 'pre_feeding')
-    acknowledge_notification(fid, 'regular_feeding')
+    acknowledge_notification(fid, 'due_feeding')
     acknowledge_notification(fid, 'overdue_feeding')
 
 def acknowledge_diaper_notifications(fid):
     """Подтверждает уведомления о смене подгузника"""
     acknowledge_notification(fid, 'pre_diaper')
-    acknowledge_notification(fid, 'regular_diaper')
+    acknowledge_notification(fid, 'due_diaper')
     acknowledge_notification(fid, 'overdue_diaper')
 
 def handle_feeding_callback(event, minutes_ago):
@@ -283,37 +279,6 @@ def calculate_next_time_message(hours, minutes, interval, event_type):
         return f"⏰ **До следующей смены:**\n**{next_time_str}**\n\n"
 
 
-# Функция для внешнего keep-alive (для Replit)
-def external_keep_alive():
-    """Функция для внешнего keep-alive через Replit"""
-    try:
-        import urllib.request
-        import urllib.error
-        
-        # Получаем внешний URL из переменных окружения
-        external_url = REPLIT_EXTERNAL_URL
-        if external_url:
-            # Убираем trailing slash если есть
-            if external_url.endswith('/'):
-                external_url = external_url[:-1]
-            
-            # Пингуем внешний URL
-            try:
-                response = urllib.request.urlopen(f'{external_url}/ping', timeout=10)
-                if response.getcode() == 200:
-                    print(f"✅ External keep-alive successful: {time.strftime('%H:%M:%S')}")
-                else:
-                    print(f"⚠️ External keep-alive returned status: {response.getcode()}")
-            except urllib.error.URLError as e:
-                print(f"⚠️ External keep-alive failed: {e}")
-            except Exception as e:
-                print(f"⚠️ External keep-alive error: {e}")
-        else:
-            print("ℹ️ External URL not set, skipping external keep-alive")
-            
-    except Exception as e:
-        print(f"❌ External keep-alive critical error: {e}")
-
 init_supabase()
 scheduler = AsyncIOScheduler()
 
@@ -332,223 +297,172 @@ def keep_alive_ping():
         print(f"❌ Keep-alive ping critical error: {e}")
 
 telegram_client = None
-reminder_queue = []  # Очередь для напоминаний
+reminder_queue: Deque[Dict[str, object]] = deque()
+
+REMINDER_BUTTONS = {
+    'feeding': ("🍼 Отметить кормление", b"feed_now"),
+    'diaper': ("💩 Смена подгузника", b"diaper_now"),
+}
+
+REMINDER_SCENARIOS = {
+    'due': {
+        'check': check_smart_reminder_conditions,  # Сразу по наступлению срока
+        'message': get_smart_reminder_message,
+        'conditions': {
+            'feeding': {
+                'flag': 'needs_feeding',
+                'notification_type': 'due_feeding',
+                # Подавляем повтор на длительный период (10 часов) и не дублируем с overdue
+                'cooldowns': [('due_feeding', 600), ('overdue_feeding', 600)],
+            },
+            'diaper': {
+                'flag': 'needs_diaper',
+                'notification_type': 'due_diaper',
+                'cooldowns': [('due_diaper', 600), ('overdue_diaper', 600)],
+            },
+        },
+    },
+    'overdue': {
+        'check': check_overdue_reminder_conditions,
+        'message': get_overdue_reminder_message,
+        'conditions': {
+            'feeding': {
+                'flag': 'needs_overdue_feeding',
+                'notification_type': 'overdue_feeding',
+                # Разовое напоминание через 20 минут, больше не повторяем в течение 10 часов
+                'cooldowns': [('overdue_feeding', 600), ('due_feeding', 600)],
+            },
+            'diaper': {
+                'flag': 'needs_overdue_diaper',
+                'notification_type': 'overdue_diaper',
+                'cooldowns': [('overdue_diaper', 600), ('due_diaper', 600)],
+            },
+        },
+    },
+}
+
+
+
+def should_queue_notification(family_id: int, flag: bool, cooldowns):
+    if not flag:
+        return False
+    for notification_type, minutes in cooldowns:
+        if check_recent_notification(family_id, notification_type, minutes):
+            return False
+    return True
+
+
+def build_reminder_buttons(event_types):
+    return [
+        [Button.inline(REMINDER_BUTTONS[event][0], REMINDER_BUTTONS[event][1])]
+        for event in event_types
+    ]
+
 
 def send_smart_reminders():
-    """Отправка напоминаний всем семьям"""
+    """Автоматические проверки расписаний для напоминаний"""
     global telegram_client, reminder_queue
-    
+
     if not telegram_client:
-        print("⚠️ Telegram client not available for reminders")
+        print("[Reminders] Telegram client not available; skipping run")
         return
-    
+
     try:
-        print(f"🔔 Checking smart reminders: {time.strftime('%H:%M:%S')}")
-        
-        # Получаем все семьи
         families = get_all_families()
-        print(f"🔔 Found {len(families)} families to check")
-        
         if not families:
-            print("🔔 No families found in database")
             return
-        
+
+        queued_entries = 0
+        dedup_keys = set()
+
         for family_id in families:
             try:
-                print(f"🔔 Checking family {family_id}")
-                
-                # Проверяем предварительные напоминания (за 5 минут)
-                pre_conditions = check_pre_reminder_conditions(family_id)
-                print(f"🔔 Family {family_id} - pre_feeding: {pre_conditions['needs_pre_feeding']}, pre_diaper: {pre_conditions['needs_pre_diaper']}")
-                
-                if pre_conditions['needs_pre_feeding'] or pre_conditions['needs_pre_diaper']:
-                    print(f"🔔 Family {family_id} - needs pre-reminder!")
-                    
-                    # Проверяем, не отправляли ли мы уже предварительные уведомления недавно
-                    # Также проверяем, что не отправляли обычные или просроченные уведомления
-                    should_send_pre_feeding = (pre_conditions['needs_pre_feeding'] and 
-                                             not check_recent_notification(family_id, 'pre_feeding', 5) and
-                                             not check_recent_notification(family_id, 'regular_feeding', 10) and
-                                             not check_recent_notification(family_id, 'overdue_feeding', 10))
-                    should_send_pre_diaper = (pre_conditions['needs_pre_diaper'] and 
-                                            not check_recent_notification(family_id, 'pre_diaper', 5) and
-                                            not check_recent_notification(family_id, 'regular_diaper', 10) and
-                                            not check_recent_notification(family_id, 'overdue_diaper', 10))
-                    
-                    if should_send_pre_feeding or should_send_pre_diaper:
-                        # Получаем сообщение предварительного напоминания
-                        message = get_pre_reminder_message(family_id)
-                        if message:
-                            # Получаем членов семьи для отправки уведомлений
-                            members = get_family_members_for_notification(family_id)
-                            
-                            if members:
-                                # Создаем кнопки для быстрых действий
-                                buttons = []
-                                if should_send_pre_feeding:
-                                    buttons.append([Button.inline("🍼 Отметить кормление", b"feed_now")])
-                                if should_send_pre_diaper:
-                                    buttons.append([Button.inline("💩 Смена подгузника", b"diaper_now")])
-                                
-                                # Добавляем предварительные напоминания в очередь
-                                for user_id in members:
-                                    reminder_queue.append({
-                                        'user_id': user_id,
-                                        'message': message,
-                                        'buttons': buttons,
-                                        'notification_type': 'pre_feeding' if should_send_pre_feeding else 'pre_diaper',
-                                        'family_id': family_id
-                                    })
-                                    print(f"🔔 Added pre-reminder to queue for user {user_id}")
-                                
-                                # Логируем отправку уведомления
-                                if should_send_pre_feeding:
-                                    log_notification_sent(family_id, 'pre_feeding', get_thai_time())
-                                if should_send_pre_diaper:
-                                    log_notification_sent(family_id, 'pre_diaper', get_thai_time())
-                
-                # Проверяем просроченные напоминания (через 15 минут после времени)
-                overdue_conditions = check_overdue_reminder_conditions(family_id)
-                print(f"🔔 Family {family_id} - overdue_feeding: {overdue_conditions['needs_overdue_feeding']}, overdue_diaper: {overdue_conditions['needs_overdue_diaper']}")
-                
-                if overdue_conditions['needs_overdue_feeding'] or overdue_conditions['needs_overdue_diaper']:
-                    print(f"🔔 Family {family_id} - needs overdue reminder!")
-                    
-                    # Проверяем, не отправляли ли мы уже просроченные уведомления недавно
-                    # Также проверяем, что не отправляли предварительные или обычные уведомления
-                    should_send_overdue_feeding = (overdue_conditions['needs_overdue_feeding'] and 
-                                                 not check_recent_notification(family_id, 'overdue_feeding', 15) and
-                                                 not check_recent_notification(family_id, 'pre_feeding', 10) and
-                                                 not check_recent_notification(family_id, 'regular_feeding', 10))
-                    should_send_overdue_diaper = (overdue_conditions['needs_overdue_diaper'] and 
-                                                not check_recent_notification(family_id, 'overdue_diaper', 15) and
-                                                not check_recent_notification(family_id, 'pre_diaper', 10) and
-                                                not check_recent_notification(family_id, 'regular_diaper', 10))
-                    
-                    if should_send_overdue_feeding or should_send_overdue_diaper:
-                        # Получаем сообщение просроченного напоминания
-                        message = get_overdue_reminder_message(family_id)
-                        if message:
-                            # Получаем членов семьи для отправки уведомлений
-                            members = get_family_members_for_notification(family_id)
-                            
-                            if members:
-                                # Создаем кнопки для быстрых действий
-                                buttons = []
-                                if should_send_overdue_feeding:
-                                    buttons.append([Button.inline("🍼 Отметить кормление", b"feed_now")])
-                                if should_send_overdue_diaper:
-                                    buttons.append([Button.inline("💩 Смена подгузника", b"diaper_now")])
-                                
-                                # Добавляем просроченные напоминания в очередь
-                                for user_id in members:
-                                    reminder_queue.append({
-                                        'user_id': user_id,
-                                        'message': message,
-                                        'buttons': buttons,
-                                        'notification_type': 'overdue_feeding' if should_send_overdue_feeding else 'overdue_diaper',
-                                        'family_id': family_id
-                                    })
-                                    print(f"🔔 Added overdue reminder to queue for user {user_id}")
-                                
-                                # Логируем отправку уведомления
-                                if should_send_overdue_feeding:
-                                    log_notification_sent(family_id, 'overdue_feeding', get_thai_time())
-                                if should_send_overdue_diaper:
-                                    log_notification_sent(family_id, 'overdue_diaper', get_thai_time())
-                
-                # Проверяем обычные напоминания (когда время пришло)
-                conditions = check_smart_reminder_conditions(family_id)
-                print(f"🔔 Family {family_id} - needs_feeding: {conditions['needs_feeding']}, needs_diaper: {conditions['needs_diaper']}")
-                
-                if conditions['needs_feeding'] or conditions['needs_diaper']:
-                    print(f"🔔 Family {family_id} - needs regular reminder!")
-                    
-                    # Проверяем, не отправляли ли мы уже обычные уведомления недавно
-                    # Также проверяем, что не отправляли предварительные или просроченные уведомления
-                    should_send_regular_feeding = (conditions['needs_feeding'] and 
-                                                 not check_recent_notification(family_id, 'regular_feeding', 30) and
-                                                 not check_recent_notification(family_id, 'pre_feeding', 10) and
-                                                 not check_recent_notification(family_id, 'overdue_feeding', 10))
-                    should_send_regular_diaper = (conditions['needs_diaper'] and 
-                                                not check_recent_notification(family_id, 'regular_diaper', 30) and
-                                                not check_recent_notification(family_id, 'pre_diaper', 10) and
-                                                not check_recent_notification(family_id, 'overdue_diaper', 10))
-                    
-                    if should_send_regular_feeding or should_send_regular_diaper:
-                        # Получаем сообщение напоминания
-                        message = get_smart_reminder_message(family_id)
-                        if message:
-                            # Получаем членов семьи для отправки уведомлений
-                            members = get_family_members_for_notification(family_id)
-                            
-                            if members:
-                                # Создаем кнопки для быстрых действий
-                                buttons = []
-                                if should_send_regular_feeding:
-                                    buttons.append([Button.inline("🍼 Отметить кормление", b"feed_now")])
-                                if should_send_regular_diaper:
-                                    buttons.append([Button.inline("💩 Смена подгузника", b"diaper_now")])
-                                
-                                # Добавляем обычные напоминания в очередь
-                                for user_id in members:
-                                    reminder_queue.append({
-                                        'user_id': user_id,
-                                        'message': message,
-                                        'buttons': buttons,
-                                        'notification_type': 'regular_feeding' if should_send_regular_feeding else 'regular_diaper',
-                                        'family_id': family_id
-                                    })
-                                    print(f"🔔 Added regular reminder to queue for user {user_id}")
-                                
-                                # Логируем отправку уведомления
-                                if should_send_regular_feeding:
-                                    log_notification_sent(family_id, 'regular_feeding', get_thai_time())
-                                if should_send_regular_diaper:
-                                    log_notification_sent(family_id, 'regular_diaper', get_thai_time())
-                
-                print(f"✅ All reminders checked for family {family_id}")
-                
-            except Exception as e:
-                print(f"❌ Ошибка обработки семьи {family_id}: {e}")
+                for scenario_name, scenario in REMINDER_SCENARIOS.items():
+                    conditions = scenario['check'](family_id) or {}
+                    triggered = []
+
+                    for event_type, rule in scenario['conditions'].items():
+                        flag = conditions.get(rule['flag'])
+                        if should_queue_notification(family_id, flag, rule['cooldowns']):
+                            triggered.append((event_type, rule['notification_type']))
+
+                    if not triggered:
+                        continue
+
+                    message = scenario['message'](family_id)
+                    if not message:
+                        continue
+
+                    members = get_family_members_for_notification(family_id)
+                    if not members:
+                        continue
+
+                    event_types = [event for event, _ in triggered]
+                    buttons = build_reminder_buttons(event_types)
+                    notification_types = [notification_type for _, notification_type in triggered]
+                    timestamp = get_thai_time()
+
+                    for user_id in members:
+                        dedup_key = (family_id, user_id, scenario_name, tuple(notification_types))
+                        if dedup_key in dedup_keys:
+                            continue
+
+                        reminder_queue.append({
+                            'user_id': user_id,
+                            'message': message,
+                            'buttons': buttons,
+                            'family_id': family_id,
+                        })
+                        dedup_keys.add(dedup_key)
+                        queued_entries += 1
+
+                    for notification_type in notification_types:
+                        log_notification_sent(family_id, notification_type, timestamp)
+            except Exception as family_error:
+                print(f"[Reminders] Failed to process family {family_id}: {family_error}")
                 continue
-                
-    except Exception as e:
-        print(f"❌ Critical error in smart reminders: {e}")
+
+        if queued_entries:
+            print(f"[Reminders] Reminders queued: {queued_entries}")
+    except Exception as error:
+        print(f"[Reminders] Critical error: {error}")
+
 
 async def send_reminder_message(user_id: int, message: str, buttons: list):
     """Асинхронная отправка сообщения напоминания"""
     global telegram_client
-    
+
     if not telegram_client:
         return
-    
+
     try:
         await telegram_client.send_message(user_id, message, buttons=buttons)
     except Exception as e:
-        print(f"❌ Ошибка отправки сообщения пользователю {user_id}: {e}")
+        print(f"[Reminders] Failed to send reminder to user {user_id}: {e}")
+
 
 async def process_reminder_queue():
     """Обработка очереди напоминаний"""
     global reminder_queue, telegram_client
-    
+
     if not telegram_client or not reminder_queue:
         return
-    
-    print(f"📤 Processing {len(reminder_queue)} reminders from queue...")
-    
-    # Обрабатываем все напоминания в очереди
+
+    queue_size = len(reminder_queue)
+    print(f"[Reminders] Delivering {queue_size} queued message(s)")
+
     while reminder_queue:
-        reminder = reminder_queue.pop(0)
+        reminder = reminder_queue.popleft()
         try:
             await send_reminder_message(
-                reminder['user_id'], 
-                reminder['message'], 
+                reminder['user_id'],
+                reminder['message'],
                 reminder['buttons']
             )
-            print(f"✅ Reminder sent to user {reminder['user_id']}")
+            print(f"[Reminders] Delivered reminder to user {reminder['user_id']}")
         except Exception as e:
-            print(f"❌ Ошибка отправки напоминания пользователю {reminder['user_id']}: {e}")
+            print(f"[Reminders] Failed to deliver reminder to user {reminder['user_id']}: {e}")
+
 
 scheduler.add_job(keep_alive_ping, 'interval', minutes=5, id='keep_alive_ping')
 print("⏰ Keep-alive ping scheduled every 5 minutes")
@@ -556,28 +470,14 @@ print("⏰ Keep-alive ping scheduled every 5 minutes")
 scheduler.add_job(send_smart_reminders, 'interval', minutes=5, id='smart_reminders')
 print("⏰ Smart reminders scheduled every 5 minutes")
 
-def process_reminder_queue_sync():
-    """Синхронная обработка очереди напоминаний"""
-    global reminder_queue
-    if reminder_queue:
-        print(f"📤 Found {len(reminder_queue)} reminders in queue")
-        # Обработка будет происходить в главном цикле бота
-
-scheduler.add_job(process_reminder_queue_sync, 'interval', minutes=1, id='process_reminders')
-print("⏰ Reminder queue processing scheduled every 1 minute")
-
-
-scheduler.add_job(external_keep_alive, 'interval', minutes=3, id='external_keep_alive')
-print("⏰ External keep-alive scheduled every 3 minutes")
-
 def cleanup_notifications():
-    """Очистка старых записей уведомлений"""
+    """Очистка старых уведомлений"""
     try:
-        print(f"🧹 Cleaning up old notifications: {time.strftime('%H:%M:%S')}")
-        cleanup_old_notifications(7)  # Удаляем записи старше 7 дней
-        print("✅ Old notifications cleaned up")
+        print(f"[Notifications] Cleaning up old notifications at {time.strftime('%H:%M:%S')}")
+        cleanup_old_notifications(7)
+        print("[Notifications] Old notifications cleaned up")
     except Exception as e:
-        print(f"❌ Error cleaning up notifications: {e}")
+        print(f"[Notifications] Cleanup failed: {e}")
 
 scheduler.add_job(cleanup_notifications, 'interval', hours=24, id='cleanup_notifications')
 print("⏰ Notification cleanup scheduled every 24 hours")
@@ -592,47 +492,6 @@ activity_pending = {}
 baby_birth_pending = {}
 custom_time_pending = {}
 duplicate_confirmation_pending = {}  # Для подтверждения дубликатов
-
-def is_port_available(port):
-    """Проверяет, доступен ли порт"""
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', port))
-            return True
-    except OSError:
-        return False
-
-def start_health_server(port=8001):
-    """Запуск HTTP сервера для health checks"""
-    class HealthHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/ping':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                self.wfile.write(b'pong')
-            else:
-                self.send_response(404)
-                self.end_headers()
-    
-    # Пытаемся найти свободный порт
-    for attempt in range(10):
-        if is_port_available(port):
-            try:
-                with socketserver.TCPServer(("", port), HealthHandler) as httpd:
-                    print(f"🏥 Health server started on port {port}")
-                    httpd.serve_forever()
-                break
-            except Exception as e:
-                print(f"❌ Health server error on port {port}: {e}")
-                port += 1
-                continue
-        else:
-            print(f"⚠️ Port {port} is busy, trying port {port+1}...")
-            port += 1
-    else:
-        print("❌ Could not find available port for health server")
 
 async def start_bot():
     """Запуск бота"""
@@ -661,16 +520,6 @@ async def start_bot():
     
     # Небольшая задержка для стабилизации подключения
     await asyncio.sleep(1)
-    
-    # Запускаем health server в отдельном потоке
-    try:
-        health_thread = threading.Thread(target=start_health_server, daemon=True)
-        health_thread.start()
-        print("✅ Health server thread started")
-    except Exception as e:
-        print(f"⚠️ Health server not started: {e}")
-        print("ℹ️ Bot will continue without health server")
-    
     # Запускаем планировщик
     scheduler.start()
     print("⏰ Планировщик запущен")
@@ -951,7 +800,6 @@ async def start_bot():
         data = event.data.decode()
         uid = event.sender_id
         
-        print(f"DEBUG: Callback data: {data} for user {uid}")
         
         # Обработка кнопок кормления
         if data == "feed_now":
