@@ -1228,10 +1228,14 @@ def log_notification_sent(family_id: int, notification_type: str, event_time: da
 def check_recent_notification(family_id: int, notification_type: str, minutes_threshold: int = 5) -> bool:
     """Проверить, было ли отправлено уведомление недавно"""
     try:
-        threshold_time = get_thai_time() - timedelta(minutes=minutes_threshold)
-        
-        result = supabase.table('notification_tracking').select('sent_at').eq('family_id', family_id).eq('notification_type', notification_type).gte('sent_at', threshold_time.isoformat()).execute()
-        
+        query = supabase.table('notification_tracking').select('sent_at').eq('family_id', family_id).eq('notification_type', notification_type).eq('status', 'sent')
+
+        if minutes_threshold is not None and minutes_threshold > 0:
+            threshold_time = get_thai_time() - timedelta(minutes=minutes_threshold)
+            query = query.gte('sent_at', threshold_time.isoformat())
+
+        result = query.execute()
+
         return len(result.data) > 0
     except Exception as e:
         print(f"❌ Ошибка проверки недавних уведомлений: {e}")

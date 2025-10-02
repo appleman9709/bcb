@@ -5,7 +5,7 @@ import asyncio
 import time
 import pytz
 from collections import deque
-from typing import Optional, Dict, List, Tuple, Deque
+from typing import Optional, Dict, List, Tuple, Deque, Set
 
 import os
 from dotenv import load_dotenv
@@ -186,12 +186,14 @@ def acknowledge_feeding_notifications(fid):
     acknowledge_notification(fid, 'pre_feeding')
     acknowledge_notification(fid, 'due_feeding')
     acknowledge_notification(fid, 'overdue_feeding')
+    reset_notification_state(fid, 'feeding')
 
 def acknowledge_diaper_notifications(fid):
     """Подтверждает уведомления о смене подгузника"""
     acknowledge_notification(fid, 'pre_diaper')
     acknowledge_notification(fid, 'due_diaper')
     acknowledge_notification(fid, 'overdue_diaper')
+    reset_notification_state(fid, 'diaper')
 
 def handle_feeding_callback(event, minutes_ago):
     """Обрабатывает callback кормления"""
@@ -299,6 +301,50 @@ def keep_alive_ping():
 telegram_client = None
 reminder_queue: Deque[Dict[str, object]] = deque()
 
+notification_send_tracker: Dict[Tuple[int, str], Dict[str, object]] = {}
+MAX_NOTIFICATIONS_PER_EVENT = 2
+NOTIFICATION_SUPPRESSION_MINUTES = 1440  # ����� 24 ����, ����㢥�������� �������� ����� ������������
+
+def get_event_group(notification_type: str) -> Optional[str]:
+    if not notification_type:
+        return None
+    if 'feeding' in notification_type:
+        return 'feeding'
+    if 'diaper' in notification_type:
+        return 'diaper'
+    return None
+
+
+def has_reached_local_limit(family_id: int, notification_type: str) -> bool:
+    group = get_event_group(notification_type)
+    if not group:
+        return False
+
+    state = notification_send_tracker.get((family_id, group))
+    if not state:
+        return False
+
+    sent_types: Set[str] = state.get('sent_types', set())
+    if notification_type in sent_types:
+        return True
+
+    return len(sent_types) >= MAX_NOTIFICATIONS_PER_EVENT
+
+
+def mark_notification_sent_local(family_id: int, notification_type: str, timestamp: datetime):
+    group = get_event_group(notification_type)
+    if not group:
+        return
+
+    key = (family_id, group)
+    state = notification_send_tracker.setdefault(key, {'sent_types': set(), 'last_sent_at': None})
+    state['sent_types'].add(notification_type)
+    state['last_sent_at'] = timestamp
+
+
+def reset_notification_state(family_id: int, group: str):
+    notification_send_tracker.pop((family_id, group), None)
+
 REMINDER_BUTTONS = {
     'feeding': ("🍼 Отметить кормление", b"feed_now"),
     'diaper': ("💩 Смена подгузника", b"diaper_now"),
@@ -312,13 +358,13 @@ REMINDER_SCENARIOS = {
             'feeding': {
                 'flag': 'needs_feeding',
                 'notification_type': 'due_feeding',
-                # Подавляем повтор на длительный период (10 часов) и не дублируем с overdue
-                'cooldowns': [('due_feeding', 600), ('overdue_feeding', 600)],
+                # Подавляем повтор до подтверждения события (локальный и БД-контроль)
+                'cooldowns': [('due_feeding', NOTIFICATION_SUPPRESSION_MINUTES)],
             },
             'diaper': {
                 'flag': 'needs_diaper',
                 'notification_type': 'due_diaper',
-                'cooldowns': [('due_diaper', 600), ('overdue_diaper', 600)],
+                'cooldowns': [('due_diaper', NOTIFICATION_SUPPRESSION_MINUTES)],
             },
         },
     },
@@ -329,13 +375,13 @@ REMINDER_SCENARIOS = {
             'feeding': {
                 'flag': 'needs_overdue_feeding',
                 'notification_type': 'overdue_feeding',
-                # Разовое напоминание через 20 минут, больше не повторяем в течение 10 часов
-                'cooldowns': [('overdue_feeding', 600), ('due_feeding', 600)],
+                # Разовое напоминание через 20 минут, дальше блокируем до подтверждения
+                'cooldowns': [('overdue_feeding', NOTIFICATION_SUPPRESSION_MINUTES)],
             },
             'diaper': {
                 'flag': 'needs_overdue_diaper',
                 'notification_type': 'overdue_diaper',
-                'cooldowns': [('overdue_diaper', 600), ('due_diaper', 600)],
+                'cooldowns': [('overdue_diaper', NOTIFICATION_SUPPRESSION_MINUTES)],
             },
         },
     },
@@ -343,11 +389,15 @@ REMINDER_SCENARIOS = {
 
 
 
-def should_queue_notification(family_id: int, flag: bool, cooldowns):
+def should_queue_notification(family_id: int, flag: bool, notification_type: str, cooldowns):
     if not flag:
         return False
-    for notification_type, minutes in cooldowns:
-        if check_recent_notification(family_id, notification_type, minutes):
+
+    if has_reached_local_limit(family_id, notification_type):
+        return False
+
+    for cooldown_type, minutes in cooldowns:
+        if check_recent_notification(family_id, cooldown_type, minutes):
             return False
     return True
 
@@ -383,7 +433,7 @@ def send_smart_reminders():
 
                     for event_type, rule in scenario['conditions'].items():
                         flag = conditions.get(rule['flag'])
-                        if should_queue_notification(family_id, flag, rule['cooldowns']):
+                        if should_queue_notification(family_id, flag, rule['notification_type'], rule['cooldowns']):
                             triggered.append((event_type, rule['notification_type']))
 
                     if not triggered:
@@ -417,7 +467,10 @@ def send_smart_reminders():
                         queued_entries += 1
 
                     for notification_type in notification_types:
-                        log_notification_sent(family_id, notification_type, timestamp)
+                        success = log_notification_sent(family_id, notification_type, timestamp)
+                        if not success:
+                            print(f"[Notifications] Failed to log notification {notification_type} for family {family_id}")
+                        mark_notification_sent_local(family_id, notification_type, timestamp)
             except Exception as family_error:
                 print(f"[Reminders] Failed to process family {family_id}: {family_error}")
                 continue
